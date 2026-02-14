@@ -16,6 +16,7 @@ tmp_test_area/
 .ruff_cache/
 .coverage
 htmlcov/
+outputs/
 *.epub
 *.pdf
 *.log

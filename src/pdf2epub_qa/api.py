@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -6,6 +6,7 @@ import re
 import shutil
 import tempfile
 import unicodedata
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -14,6 +15,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .batch import convert_pdfs_batch
 from .converter import convert_pdf_to_epub
 from .qa import review_pdf_epub
 from .reporting import build_user_summary
@@ -35,6 +37,47 @@ def _safe_stem(file_name: str) -> str:
     stem = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode("ascii")
     stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", stem).strip("-")
     return stem or "arquivo"
+
+
+def _output_url(path: Path) -> str:
+    rel = path.resolve().relative_to(OUTPUT_DIR.resolve())
+    return "/outputs/" + "/".join(rel.parts)
+
+
+def _save_batch_uploads(
+    pdfs: list[UploadFile], input_dir: Path
+) -> tuple[list[Path], dict[str, str]]:
+    input_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths: list[Path] = []
+    original_name_by_saved: dict[str, str] = {}
+    used_names: set[str] = set()
+
+    for upload in pdfs:
+        original_name = upload.filename or "input.pdf"
+        if not original_name.lower().endswith(".pdf"):
+            continue
+        safe_stem = _safe_stem(original_name)
+        candidate = f"{safe_stem}.pdf"
+        idx = 1
+        while candidate.lower() in used_names:
+            candidate = f"{safe_stem}-{idx}.pdf"
+            idx += 1
+        used_names.add(candidate.lower())
+
+        target = input_dir / candidate
+        _save_upload(upload, target)
+        saved_paths.append(target)
+        original_name_by_saved[str(target)] = original_name
+
+    return saved_paths, original_name_by_saved
+
+
+def _batch_status(success_count: int, failed_count: int) -> str:
+    if failed_count == 0:
+        return "ok"
+    if success_count > 0:
+        return "parcial"
+    return "erro"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -65,7 +108,7 @@ async def ui() -> HTMLResponse:
         background: radial-gradient(circle at top right, #dbeafe, #f4f7fb 35%);
       }
       .wrap {
-        max-width: 920px;
+        max-width: 980px;
         margin: 28px auto;
         padding: 0 16px 24px;
       }
@@ -75,10 +118,15 @@ async def ui() -> HTMLResponse:
         border-radius: 14px;
         padding: 18px;
         box-shadow: 0 8px 24px rgba(16, 24, 40, 0.06);
+        margin-bottom: 14px;
       }
       h1 {
         margin: 0 0 6px;
         font-size: 26px;
+      }
+      h2 {
+        margin: 0 0 6px;
+        font-size: 20px;
       }
       .sub {
         margin: 0 0 14px;
@@ -166,8 +214,15 @@ async def ui() -> HTMLResponse:
     <div class="wrap">
       <div class="card">
         <h1>Conversor PDF para EPUB</h1>
-        <p class="sub">Selecione o PDF, converta e veja o resumo do QA em linguagem simples.</p>
-        <form id="form" class="grid">
+        <p class="sub">
+          Agora voce pode converter 1 PDF ou varios PDFs em massa, direto no navegador.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Conversao unica + QA</h2>
+        <p class="sub">Converte um PDF, roda QA e mostra o resumo leigo.</p>
+        <form id="singleForm" class="grid">
           <div class="full">
             <label for="pdf">Arquivo PDF</label>
             <input id="pdf" name="pdf" type="file" accept=".pdf,application/pdf" required />
@@ -195,40 +250,110 @@ async def ui() -> HTMLResponse:
             </select>
           </div>
           <div class="full">
-            <button id="submitBtn" type="submit">Converter e revisar</button>
+            <button id="singleBtn" type="submit">Converter e revisar</button>
           </div>
         </form>
-        <div id="status" class="status"></div>
-        <div id="result" class="result">
+        <div id="singleStatus" class="status"></div>
+        <div id="singleResult" class="result">
           <div class="links">
             <a id="epubLink" href="#" target="_blank" rel="noopener">Baixar EPUB</a>
             <a id="reportLink" href="#" target="_blank" rel="noopener">Baixar relatorio JSON</a>
           </div>
-          <div id="chips" class="chips"></div>
-          <pre id="summary"></pre>
+          <div id="singleChips" class="chips"></div>
+          <pre id="singleSummary"></pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Conversao em massa (lote)</h2>
+        <p class="sub">Selecione varios PDFs ou uma pasta e converta tudo de uma vez.</p>
+        <form id="batchForm" class="grid">
+          <div class="full">
+            <label for="batchPdfs">PDFs (multiplos ou pasta)</label>
+            <input
+              id="batchPdfs"
+              name="pdfs"
+              type="file"
+              multiple
+              webkitdirectory
+              directory
+              accept=".pdf,application/pdf"
+              required
+            />
+          </div>
+          <div>
+            <label for="batchLang">Idioma</label>
+            <select id="batchLang" name="lang">
+              <option value="pt-BR">pt-BR</option>
+              <option value="en">en</option>
+            </select>
+          </div>
+          <div>
+            <label for="batchLayout">Layout</label>
+            <select id="batchLayout" name="layout">
+              <option value="reflow" selected>reflow (mais leve)</option>
+              <option value="fixed">fixed (visual igual ao PDF)</option>
+            </select>
+          </div>
+          <div>
+            <label for="batchWorkers">Workers paralelos</label>
+            <input id="batchWorkers" name="workers" type="number" min="1" max="8" value="2" />
+          </div>
+          <div>
+            <label for="batchAuthor">Autor padrao (opcional)</label>
+            <input id="batchAuthor" name="author" type="text" placeholder="Autor para todos" />
+          </div>
+          <div class="full">
+            <button id="batchBtn" type="submit">Converter em massa</button>
+          </div>
+        </form>
+        <div id="batchStatus" class="status"></div>
+        <div id="batchResult" class="result">
+          <div class="links">
+            <a id="batchZipLink" href="#" target="_blank" rel="noopener">Baixar EPUBs (.zip)</a>
+            <a id="batchReportLink" href="#" target="_blank" rel="noopener">
+              Baixar relatorio do lote
+            </a>
+            <a id="batchRetryLink" href="#" target="_blank" rel="noopener">
+              Baixar relatorio de retry
+            </a>
+          </div>
+          <div id="batchChips" class="chips"></div>
+          <pre id="batchSummary"></pre>
         </div>
       </div>
     </div>
+
     <script>
-      const form = document.getElementById("form");
-      const statusBox = document.getElementById("status");
-      const resultBox = document.getElementById("result");
-      const summaryEl = document.getElementById("summary");
-      const chipsEl = document.getElementById("chips");
-      const submitBtn = document.getElementById("submitBtn");
+      const singleForm = document.getElementById("singleForm");
+      const singleStatus = document.getElementById("singleStatus");
+      const singleResult = document.getElementById("singleResult");
+      const singleBtn = document.getElementById("singleBtn");
+      const singleChips = document.getElementById("singleChips");
+      const singleSummary = document.getElementById("singleSummary");
       const epubLink = document.getElementById("epubLink");
       const reportLink = document.getElementById("reportLink");
 
-      function showStatus(message, background = "#eff6ff", color = "#1849a9") {
-        statusBox.style.display = "block";
-        statusBox.style.background = background;
-        statusBox.style.color = color;
-        statusBox.textContent = message;
+      const batchForm = document.getElementById("batchForm");
+      const batchStatus = document.getElementById("batchStatus");
+      const batchResult = document.getElementById("batchResult");
+      const batchBtn = document.getElementById("batchBtn");
+      const batchChips = document.getElementById("batchChips");
+      const batchSummary = document.getElementById("batchSummary");
+      const batchZipLink = document.getElementById("batchZipLink");
+      const batchReportLink = document.getElementById("batchReportLink");
+      const batchRetryLink = document.getElementById("batchRetryLink");
+
+      function showStatus(el, message, background = "#eff6ff", color = "#1849a9") {
+        el.style.display = "block";
+        el.style.background = background;
+        el.style.color = color;
+        el.textContent = message;
       }
 
       function chipClass(status) {
-        if (status === "excelente") return "chip ok";
-        if (status === "bom") return "chip warn";
+        if (status === "excelente" || status === "ok") return "chip ok";
+        if (status === "bom" || status === "parcial") return "chip warn";
         return "chip bad";
       }
 
@@ -238,56 +363,55 @@ async def ui() -> HTMLResponse:
         lines.push(`Mensagem: ${summary.mensagem}`);
         lines.push("");
         lines.push("O que este resultado significa:");
-        for (const item of (summary.explicacao_simples || [])) {
-          lines.push(`- ${item}`);
-        }
+        for (const item of (summary.explicacao_simples || [])) lines.push(`- ${item}`);
         lines.push("");
         lines.push("Pontos de atencao:");
-        for (const item of (summary.sinais_de_atencao || [])) {
-          lines.push(`- ${item}`);
-        }
+        for (const item of (summary.sinais_de_atencao || [])) lines.push(`- ${item}`);
         lines.push("");
         lines.push("O que fazer agora:");
-        for (const item of (summary.recomendacoes || [])) {
-          lines.push(`- ${item}`);
-        }
-        const diff = summary.diferencas_texto || {};
-        const examplesMissing = diff.exemplos_faltando || [];
-        const examplesExtra = diff.exemplos_extras || [];
-        if (examplesMissing.length || examplesExtra.length) {
-          lines.push("");
-          lines.push("Exemplos de diferencas encontradas:");
-          for (const item of examplesMissing) {
-            lines.push(`- Faltando: ${item}`);
-          }
-          for (const item of examplesExtra) {
-            lines.push(`- Extra: ${item}`);
-          }
-        }
+        for (const item of (summary.recomendacoes || [])) lines.push(`- ${item}`);
         return lines.join("\\n");
       }
 
-      form.addEventListener("submit", async (event) => {
+      function renderBatchSummary(summary) {
+        const lines = [];
+        lines.push(`Status: ${summary.status_geral}`);
+        lines.push(`Mensagem: ${summary.mensagem}`);
+        lines.push("");
+        lines.push(`Total de PDFs: ${summary.total}`);
+        lines.push(`Sucesso: ${summary.sucesso}`);
+        lines.push(`Erros: ${summary.erros}`);
+        lines.push(`Workers: ${summary.workers}`);
+        if ((summary.falhas || []).length > 0) {
+          lines.push("");
+          lines.push("Arquivos com erro:");
+          for (const item of summary.falhas.slice(0, 20)) lines.push(`- ${item}`);
+          if (summary.falhas.length > 20) lines.push(`- e mais ${summary.falhas.length - 20}`);
+        }
+        lines.push("");
+        lines.push("Dica: baixe o relatorio de retry e reenvie somente os PDFs com erro.");
+        return lines.join("\\n");
+      }
+
+      singleForm.addEventListener("submit", async (event) => {
         event.preventDefault();
-        const data = new FormData(form);
-        resultBox.style.display = "none";
-        submitBtn.disabled = true;
-        showStatus("Processando arquivo. Isso pode levar alguns segundos...");
+        const data = new FormData(singleForm);
+        singleResult.style.display = "none";
+        singleBtn.disabled = true;
+        showStatus(singleStatus, "Processando arquivo. Isso pode levar alguns segundos...");
 
         try {
           const response = await fetch("/convert-and-review", { method: "POST", body: data });
           const payload = await response.json();
-          if (!response.ok) {
-            throw new Error(payload.error || "Falha na conversao.");
-          }
+          if (!response.ok) throw new Error(payload.error || "Falha na conversao.");
 
-          showStatus("Conversao concluida com sucesso.", "#ecfdf3", "#067647");
+          showStatus(singleStatus, "Conversao concluida com sucesso.", "#ecfdf3", "#067647");
           epubLink.href = payload.files.epub_download_url;
           reportLink.href = payload.files.report_download_url;
 
           const s = payload.summary;
           const visual = s.visual_qa_percent == null ? "n/a" : `${s.visual_qa_percent}%`;
-          chipsEl.innerHTML = `
+          singleChips.innerHTML = `
             <span class="${chipClass(s.status_geral)}">status: ${s.status_geral}</span>
             <span class="chip">texto: ${s.texto_preservado_percent}%</span>
             <span class="chip">paginas com alerta: ${s.paginas_com_alerta}</span>
@@ -295,12 +419,58 @@ async def ui() -> HTMLResponse:
             <span class="chip">imagens: ${s.imagens_pdf}/${s.imagens_epub}</span>
           `;
 
-          summaryEl.textContent = renderSimpleSummary(payload.client_report);
-          resultBox.style.display = "block";
+          singleSummary.textContent = renderSimpleSummary(payload.client_report);
+          singleResult.style.display = "block";
         } catch (err) {
-          showStatus(err.message || "Erro inesperado.", "#fef3f2", "#b42318");
+          showStatus(singleStatus, err.message || "Erro inesperado.", "#fef3f2", "#b42318");
         } finally {
-          submitBtn.disabled = false;
+          singleBtn.disabled = false;
+        }
+      });
+
+      batchForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const filesInput = document.getElementById("batchPdfs");
+        if (!filesInput.files || filesInput.files.length === 0) {
+          showStatus(batchStatus, "Selecione pelo menos 1 PDF.", "#fef3f2", "#b42318");
+          return;
+        }
+
+        const data = new FormData(batchForm);
+        batchResult.style.display = "none";
+        batchBtn.disabled = true;
+        showStatus(batchStatus, "Processando lote. Nao feche esta pagina...");
+
+        try {
+          const response = await fetch("/batch-convert-upload", { method: "POST", body: data });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || "Falha na conversao em massa.");
+
+          showStatus(batchStatus, "Lote finalizado.", "#ecfdf3", "#067647");
+          if (payload.files.zip_download_url) {
+            batchZipLink.href = payload.files.zip_download_url;
+            batchZipLink.style.display = "inline-block";
+          } else {
+            batchZipLink.style.display = "none";
+          }
+          batchReportLink.href = payload.files.report_download_url;
+          batchRetryLink.href = payload.files.retry_download_url;
+
+          const s = payload.summary;
+          batchChips.innerHTML = `
+            <span class="${chipClass(s.status_geral)}">status: ${s.status_geral}</span>
+            <span class="chip">total: ${s.total}</span>
+            <span class="chip">sucesso: ${s.sucesso}</span>
+            <span class="chip">erros: ${s.erros}</span>
+            <span class="chip">workers: ${s.workers}</span>
+          `;
+
+          batchSummary.textContent = renderBatchSummary(s);
+          batchResult.style.display = "block";
+        } catch (err) {
+          showStatus(batchStatus, err.message || "Erro inesperado.", "#fef3f2", "#b42318");
+        } finally {
+          batchBtn.disabled = false;
         }
       });
     </script>
@@ -356,13 +526,148 @@ async def convert_and_review_endpoint(
             "pdf_name": pdf_path.name,
             "epub_name": epub_path.name,
             "report_name": report_path.name,
-            "epub_download_url": f"/outputs/{epub_path.name}",
-            "report_download_url": f"/outputs/{report_path.name}",
+            "epub_download_url": _output_url(epub_path),
+            "report_download_url": _output_url(report_path),
         },
         "summary": client_report,
         "client_report": client_report,
     }
     return JSONResponse(content=response)
+
+
+@app.post("/batch-convert-upload")
+async def batch_convert_upload_endpoint(
+    pdfs: list[UploadFile] = File(...),
+    lang: str = Form("pt-BR"),
+    layout: str = Form("reflow"),
+    workers: int = Form(2),
+    author: str | None = Form(None),
+) -> JSONResponse:
+    if layout not in {"reflow", "fixed"}:
+        return JSONResponse(
+            status_code=400, content={"error": "layout invalido. Use reflow ou fixed."}
+        )
+
+    max_workers = max(1, min(8, os.cpu_count() or 2))
+    workers = max(1, min(int(workers), max_workers))
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    token = uuid4().hex[:8]
+    run_dir = OUTPUT_DIR / f"batch-{stamp}-{token}"
+    input_dir = run_dir / "inputs"
+    epub_dir = run_dir / "epubs"
+    report_path = run_dir / "batch-report.json"
+    retry_path = run_dir / "batch-report.retry.json"
+    zip_path = run_dir / "batch-epubs.zip"
+
+    try:
+        saved_paths, original_name_by_saved = _save_batch_uploads(pdfs, input_dir)
+        if not saved_paths:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Nenhum PDF valido enviado. Selecione arquivos .pdf."},
+            )
+
+        report = convert_pdfs_batch(
+            input_paths=saved_paths,
+            output_dir=epub_dir,
+            workers=workers,
+            recursive=False,
+            lang=lang,
+            layout_mode=layout,
+            author=author,
+        )
+
+        result_items: list[dict] = []
+        failed_names: list[str] = []
+        for item in report["results"]:
+            original_name = original_name_by_saved.get(
+                item["input_pdf"], Path(item["input_pdf"]).name
+            )
+            ok = item["status"] == "ok"
+            row = {
+                "input_name": original_name,
+                "status": item["status"],
+                "error": item["error"],
+                "pages": item["pages"],
+                "images": item["images"],
+                "sections": item["sections"],
+                "output_epub_name": Path(item["output_epub"]).name if ok else None,
+                "output_epub_url": _output_url(Path(item["output_epub"])) if ok else None,
+            }
+            result_items.append(row)
+            if not ok:
+                failed_names.append(original_name)
+
+        api_report = {
+            "started_at": report["started_at"],
+            "finished_at": report["finished_at"],
+            "duration_seconds": report["duration_seconds"],
+            "workers": report["workers"],
+            "layout": report["layout"],
+            "lang": report["lang"],
+            "output_dir": report["output_dir"],
+            "input_count": report["input_count"],
+            "success_count": report["success_count"],
+            "failed_count": report["failed_count"],
+            "failed_input_names": failed_names,
+            "results": result_items,
+        }
+        report_path.write_text(
+            json.dumps(api_report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        retry_data = {
+            "failed_input_names": failed_names,
+            "failed_count": len(failed_names),
+            "message": "Reenvie apenas estes PDFs no modo de lote para tentar novamente.",
+        }
+        retry_path.write_text(
+            json.dumps(retry_data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        epub_files = sorted(epub_dir.glob("*.epub"))
+        zip_url = None
+        if epub_files:
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for epub_file in epub_files:
+                    zf.write(epub_file, arcname=epub_file.name)
+            zip_url = _output_url(zip_path)
+
+        summary = {
+            "status_geral": _batch_status(report["success_count"], report["failed_count"]),
+            "mensagem": (
+                "Todos os PDFs foram convertidos com sucesso."
+                if report["failed_count"] == 0
+                else "Lote finalizado com falhas. Reenvie os PDFs com erro."
+            ),
+            "total": report["input_count"],
+            "sucesso": report["success_count"],
+            "erros": report["failed_count"],
+            "workers": report["workers"],
+            "duracao_segundos": report["duration_seconds"],
+            "falhas": failed_names,
+        }
+
+        response = {
+            "ok": True,
+            "summary": summary,
+            "files": {
+                "run_dir": str(run_dir),
+                "zip_name": zip_path.name if zip_url else None,
+                "zip_download_url": zip_url,
+                "report_name": report_path.name,
+                "report_download_url": _output_url(report_path),
+                "retry_name": retry_path.name,
+                "retry_download_url": _output_url(retry_path),
+            },
+        }
+        return JSONResponse(content=response)
+
+    except RuntimeError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"Falha interna: {exc}"})
 
 
 @app.post("/convert")

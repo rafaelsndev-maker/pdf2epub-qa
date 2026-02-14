@@ -39,8 +39,9 @@ Estrutura por sistema operacional:
 
 Esses ativadores:
 - ativam o ambiente local (`.venv`)
-- iniciam a API local
-- abrem automaticamente `http://127.0.0.1:8000/` no navegador
+- iniciam a API local automaticamente
+- abrem o navegador em `http://127.0.0.1:8000/`
+- permitem conversao unica e em massa direto pela interface web
 
 Atalhos na raiz (opcional):
 - `activate_windows.bat`
@@ -96,11 +97,16 @@ http://127.0.0.1:8000/
 ```
 
 Fluxo:
-- selecione o PDF
-- escolha `fixed` ou `reflow`
-- clique em `Converter e revisar`
-- baixe EPUB e JSON
-- leia o resumo simplificado na tela
+- conversao unica:
+  - selecione 1 PDF
+  - escolha `fixed` ou `reflow`
+  - clique em `Converter e revisar`
+  - baixe EPUB e JSON
+- conversao em massa:
+  - selecione varios PDFs (ou pasta)
+  - ajuste workers/layout
+  - clique em `Converter em massa`
+  - baixe `batch-epubs.zip` + relatorios JSON
 
 Saidas ficam em `outputs/`.
 
@@ -110,6 +116,7 @@ Endpoints:
 - `POST /convert`
 - `POST /review`
 - `POST /convert-and-review`
+- `POST /batch-convert-upload`
 
 Exemplos:
 
