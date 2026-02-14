@@ -71,6 +71,16 @@ Arquivos gerados no `review`:
 - `report.json`: relatorio tecnico completo.
 - `report.leigo.json`: resumo em linguagem simples.
 
+### 4) Converter varios PDFs de uma vez (lote)
+
+```bash
+pdf2epub batch-convert "pasta_com_pdfs" -o "outputs/batch_epubs" --workers 2 --report "batch-report.json"
+```
+
+Relatorios do lote:
+- `batch-report.json`: resultado completo de cada PDF (ok/erro).
+- `batch-report.retry.json`: lista `failed_pdfs` para tentar novamente so os que falharam.
+
 ## Interface Web
 
 Suba a API:
