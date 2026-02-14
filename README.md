@@ -18,7 +18,7 @@ CI roda em Linux, Windows e macOS.
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -U pip
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.\activate_windows.bat
+.\scripts\windows\start_pdf2epub_qa.bat
 ```
 
 ### macOS / Linux
@@ -27,16 +27,25 @@ py -3.11 -m venv .venv
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
 .venv/bin/python -m pip install -e ".[dev]"
-chmod +x activate_macos.command activate_linux.sh
+chmod +x scripts/macos/start_pdf2epub_qa.command scripts/linux/start_pdf2epub_qa.sh
 ```
 
 ## Ativador por duplo clique
 
-- Windows: `activate_windows.bat`
-- macOS: `activate_macos.command`
-- Linux: `activate_linux.sh`
+Estrutura por sistema operacional:
+- Windows: `scripts/windows/start_pdf2epub_qa.bat`
+- macOS: `scripts/macos/start_pdf2epub_qa.command`
+- Linux: `scripts/linux/start_pdf2epub_qa.sh`
 
-Esses arquivos abrem um terminal com `.venv` ativado.
+Esses ativadores:
+- ativam o ambiente local (`.venv`)
+- iniciam a API local
+- abrem automaticamente `http://127.0.0.1:8000/` no navegador
+
+Atalhos na raiz (opcional):
+- `activate_windows.bat`
+- `activate_macos.command`
+- `activate_linux.sh`
 
 ## Uso pela CLI
 
