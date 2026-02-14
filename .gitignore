@@ -7,6 +7,12 @@
 venv/
 .env/
 .pytest_cache/
+.pytest_tmp/
+.tmp_pytest*/
+pytest_tmp*/
+tests_runtime/
+tests/_tmp_manual/
+tmp_test_area/
 .ruff_cache/
 .coverage
 htmlcov/

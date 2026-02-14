@@ -1,70 +1,76 @@
 ﻿# pdf2epub-qa
 
-Conversor local de PDF (texto selecionavel) para EPUB com revisao automatica (QA) pagina por pagina.
+Conversor local de PDF para EPUB com QA textual e visual por pagina.
 
-## Instalacao
+## Suporte
 
-```bash
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# Linux/macOS
-source .venv/bin/activate
+- Windows 10/11
+- macOS (Intel e Apple Silicon)
+- Linux (Python 3.11+)
 
-pip install -U pip
-pip install -e ".[dev]"
+CI roda em Linux, Windows e macOS.
+
+## Inicio rapido
+
+### Windows (PowerShell)
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\activate_windows.bat
 ```
 
-## CLI
-
-Conversao:
+### macOS / Linux
 
 ```bash
-pdf2epub convert input.pdf -o out.epub --title "Meu Livro" --author "Autor" --lang "pt-BR"
+python3 -m venv .venv
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install -e ".[dev]"
+chmod +x activate_macos.command activate_linux.sh
 ```
 
-Conversao com layout visualmente igual ao PDF (fixed-layout):
+## Ativador por duplo clique
+
+- Windows: `activate_windows.bat`
+- macOS: `activate_macos.command`
+- Linux: `activate_linux.sh`
+
+Esses arquivos abrem um terminal com `.venv` ativado.
+
+## Uso pela CLI
+
+### 1) Converter PDF para EPUB
 
 ```bash
-pdf2epub convert input.pdf -o out-fixed.epub --layout fixed --title "Meu Livro" --author "Autor" --lang "pt-BR"
+pdf2epub convert "input.pdf" -o "out.epub" --title "Meu Livro" --author "Autor" --lang "pt-BR"
 ```
 
-Revisao:
+### 2) Converter com layout visual parecido com PDF
 
 ```bash
-pdf2epub review input.pdf out.epub -o report.json
+pdf2epub convert "input.pdf" -o "out-fixed.epub" --layout fixed --title "Meu Livro" --lang "pt-BR"
 ```
 
-O relatorio JSON inclui:
-- coverage_text_percent
-- missing_segments
-- extra_segments
-- image_count_pdf vs image_count_epub
-- issues por pagina (simulacao por ancoras)
+### 3) Revisar QA
 
-## API (opcional)
+```bash
+pdf2epub review "input.pdf" "out.epub" -o "report.json"
+```
+
+Arquivos gerados no `review`:
+- `report.json`: relatorio tecnico completo.
+- `report.leigo.json`: resumo em linguagem simples.
+
+## Interface Web
+
+Suba a API:
 
 ```bash
 uvicorn pdf2epub_qa.api:app --reload
 ```
 
-Exemplo de chamada:
-
-```bash
-curl -F "pdf=@input.pdf" -F "title=Meu Livro" http://localhost:8000/convert --output out.epub
-curl -F "pdf=@input.pdf" -F "layout=fixed" http://localhost:8000/convert --output out-fixed.epub
-curl -F "pdf=@input.pdf" -F "epub=@out.epub" http://localhost:8000/review
-```
-
-## Interface Web (simples)
-
-Inicie a API:
-
-```bash
-uvicorn pdf2epub_qa.api:app --reload
-```
-
-Abra no navegador:
+Abra:
 
 ```text
 http://127.0.0.1:8000/
@@ -72,54 +78,89 @@ http://127.0.0.1:8000/
 
 Fluxo:
 - selecione o PDF
-- escolha layout `fixed` ou `reflow`
+- escolha `fixed` ou `reflow`
 - clique em `Converter e revisar`
-- baixe o `.epub` e o `.report.json`
-- veja um resumo simplificado do QA na tela
+- baixe EPUB e JSON
+- leia o resumo simplificado na tela
 
-Saida dos arquivos:
-- pasta `outputs/` dentro da pasta do projeto `conversor`
+Saidas ficam em `outputs/`.
 
-## Testes
+## API
+
+Endpoints:
+- `POST /convert`
+- `POST /review`
+- `POST /convert-and-review`
+
+Exemplos:
 
 ```bash
-pytest
+curl -F "pdf=@input.pdf" -F "layout=fixed" http://localhost:8000/convert --output out-fixed.epub
+curl -F "pdf=@input.pdf" -F "epub=@out-fixed.epub" http://localhost:8000/review
 ```
+
+## Interpretacao dos relatorios
+
+Campos principais no tecnico (`report.json`):
+- `coverage_text_percent`: quanto texto do PDF foi preservado.
+- `missing_segments`: trechos do PDF que nao apareceram no EPUB.
+- `extra_segments`: trechos extras encontrados no EPUB.
+- `image_count_pdf` e `image_count_epub`: comparacao de imagens.
+- `issues`: status por pagina (`ok`, `low_coverage`, `missing_page`, `no_text`).
+- `visual_qa`: resultado da comparacao visual quando habilitada.
+
+Campos principais no leigo (`report.leigo.json`):
+- `status_geral`
+- `mensagem`
+- `explicacao_simples`
+- `sinais_de_atencao`
+- `recomendacoes`
 
 ## Recursos opcionais
 
-OCR (para PDFs sem texto selecionavel):
+OCR (PDF escaneado):
 
 ```bash
 pip install -e ".[ocr]"
 ```
 
-Habilitar OCR:
+Depois, habilite variaveis:
 
-```bash
+```powershell
 setx PDF2EPUB_QA_ENABLE_OCR 1
 setx PDF2EPUB_QA_OCR_LANG por+eng
 ```
 
-QA visual (gera hashes de render do PDF para comparacao futura):
+QA visual:
 
-```bash
+```powershell
 setx PDF2EPUB_QA_VISUAL 1
 setx PDF2EPUB_QA_VISUAL_MAX_PAGES 10
 setx PDF2EPUB_QA_VISUAL_DPI 144
 setx PDF2EPUB_QA_VISUAL_THRESHOLD 0.985
 ```
 
-## Limitacoes do MVP
+## Testes e qualidade
 
-- OCR e opcional e requer instalacao do Tesseract.
-- Deteccao de capitulos e heuristica simples.
-- EPUB reflow nao fica 1:1 com PDF por natureza.
-- Para equivalencia visual, use `--layout fixed`.
+```bash
+pytest
+ruff check .
+```
+
+## Problemas comuns
+
+- `Arquivo nao encontrado`: use caminho entre aspas se tiver espacos.
+- `pip` pedindo `python -m pip`: use sempre `python -m pip`.
+- OCR nao funciona: confirme `tesseract --list-langs` no terminal.
+
+## Limitacoes MVP
+
+- Reflow nunca fica 1:1 com PDF.
+- OCR depende de Tesseract instalado no sistema.
+- Deteccao de capitulos ainda e heuristica.
 
 ## Roadmap
 
-- OCR (Tesseract ou similar).
-- Melhorias no QA visual por pagina (threshold por tipo de pagina).
-- Evoluir UI Web (historico, filtros e preview por pagina).
-- Melhorias de segmentacao de capitulos e metadados.
+- Melhorar segmentacao de capitulos.
+- QA visual com regras por tipo de pagina.
+- Historico de conversoes na interface web.

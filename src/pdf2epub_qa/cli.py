@@ -8,6 +8,7 @@ import typer
 from .converter import convert_pdf_to_epub
 from .epub_builder import LAYOUT_FIXED, LAYOUT_REFLOW
 from .qa import review_pdf_epub
+from .reporting import build_user_summary, format_user_summary
 
 app = typer.Typer(add_completion=False, help="PDF para EPUB com QA pagina por pagina")
 
@@ -72,6 +73,12 @@ def review(
     input_pdf: Path = typer.Argument(..., help="Caminho do PDF"),
     input_epub: Path = typer.Argument(..., help="Caminho do EPUB"),
     output: Path = typer.Option("report.json", "-o", "--output", help="JSON de saida"),
+    resumo_output: Path | None = typer.Option(
+        None,
+        "--resumo-output",
+        "--human-output",
+        help="Arquivo JSON simplificado para nao-tecnicos.",
+    ),
 ) -> None:
     _ensure_pdf(input_pdf)
     _ensure_epub(input_epub)
@@ -83,5 +90,14 @@ def review(
     except RuntimeError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
+
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = build_user_summary(report)
+    resumo_path = resumo_output or output.with_suffix(".leigo.json")
+    resumo_path.parent.mkdir(parents=True, exist_ok=True)
+    resumo_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
     typer.secho(f"Relatorio salvo em {output}", fg=typer.colors.GREEN)
+    typer.secho(f"Resumo leigo salvo em {resumo_path}", fg=typer.colors.GREEN)
+    typer.echo("")
+    typer.echo(format_user_summary(summary))

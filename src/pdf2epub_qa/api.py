@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .converter import convert_pdf_to_epub
 from .qa import review_pdf_epub
+from .reporting import build_user_summary
 
 OUTPUT_DIR = Path(os.getenv("PDF2EPUB_QA_OUTPUT_DIR", str(Path.cwd() / "outputs")))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -34,52 +35,6 @@ def _safe_stem(file_name: str) -> str:
     stem = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode("ascii")
     stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", stem).strip("-")
     return stem or "arquivo"
-
-
-def build_user_summary(report: dict) -> dict:
-    issues = report.get("issues", [])
-    non_ok = [item for item in issues if item.get("status") != "ok"]
-    no_text_pages = [item.get("page") for item in issues if item.get("status") == "no_text"]
-    low_coverage_pages = [
-        item.get("page") for item in issues if item.get("status") == "low_coverage"
-    ]
-    missing_page_pages = [
-        item.get("page") for item in issues if item.get("status") == "missing_page"
-    ]
-
-    coverage = float(report.get("coverage_text_percent", 0.0))
-    image_pdf = int(report.get("image_count_pdf", 0))
-    image_epub = int(report.get("image_count_epub", 0))
-    image_match = image_pdf == image_epub
-    visual_qa = report.get("visual_qa", {})
-    visual_status = visual_qa.get("status", "not_implemented")
-    visual_percent = visual_qa.get("coverage_visual_percent")
-
-    if coverage >= 98 and len(non_ok) == 0 and image_match:
-        status = "excelente"
-        message = "Conversao muito fiel ao arquivo original."
-    elif coverage >= 95 and image_match:
-        status = "bom"
-        message = "Conversao boa, com pequenas diferencas em algumas paginas."
-    else:
-        status = "revisar"
-        message = "Conversao concluida, mas recomenda-se revisar paginas sinalizadas."
-
-    return {
-        "status_geral": status,
-        "mensagem": message,
-        "texto_preservado_percent": round(coverage, 2),
-        "imagens_preservadas": image_match,
-        "imagens_pdf": image_pdf,
-        "imagens_epub": image_epub,
-        "paginas_total": len(issues),
-        "paginas_com_alerta": len(non_ok),
-        "paginas_sem_texto": no_text_pages[:20],
-        "paginas_baixa_cobertura": low_coverage_pages[:20],
-        "paginas_sem_ancora": missing_page_pages[:20],
-        "visual_qa_status": visual_status,
-        "visual_qa_percent": visual_percent,
-    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -277,6 +232,41 @@ async def ui() -> HTMLResponse:
         return "chip bad";
       }
 
+      function renderSimpleSummary(summary) {
+        const lines = [];
+        lines.push(`Status: ${summary.status_geral}`);
+        lines.push(`Mensagem: ${summary.mensagem}`);
+        lines.push("");
+        lines.push("O que este resultado significa:");
+        for (const item of (summary.explicacao_simples || [])) {
+          lines.push(`- ${item}`);
+        }
+        lines.push("");
+        lines.push("Pontos de atencao:");
+        for (const item of (summary.sinais_de_atencao || [])) {
+          lines.push(`- ${item}`);
+        }
+        lines.push("");
+        lines.push("O que fazer agora:");
+        for (const item of (summary.recomendacoes || [])) {
+          lines.push(`- ${item}`);
+        }
+        const diff = summary.diferencas_texto || {};
+        const examplesMissing = diff.exemplos_faltando || [];
+        const examplesExtra = diff.exemplos_extras || [];
+        if (examplesMissing.length || examplesExtra.length) {
+          lines.push("");
+          lines.push("Exemplos de diferencas encontradas:");
+          for (const item of examplesMissing) {
+            lines.push(`- Faltando: ${item}`);
+          }
+          for (const item of examplesExtra) {
+            lines.push(`- Extra: ${item}`);
+          }
+        }
+        return lines.join("\\n");
+      }
+
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const data = new FormData(form);
@@ -305,7 +295,7 @@ async def ui() -> HTMLResponse:
             <span class="chip">imagens: ${s.imagens_pdf}/${s.imagens_epub}</span>
           `;
 
-          summaryEl.textContent = JSON.stringify(payload.client_report, null, 2);
+          summaryEl.textContent = renderSimpleSummary(payload.client_report);
           resultBox.style.display = "block";
         } catch (err) {
           showStatus(err.message || "Erro inesperado.", "#fef3f2", "#b42318");
@@ -370,19 +360,7 @@ async def convert_and_review_endpoint(
             "report_download_url": f"/outputs/{report_path.name}",
         },
         "summary": client_report,
-        "client_report": {
-            "status_geral": client_report["status_geral"],
-            "mensagem": client_report["mensagem"],
-            "texto_preservado_percent": client_report["texto_preservado_percent"],
-            "imagens_preservadas": client_report["imagens_preservadas"],
-            "paginas_total": client_report["paginas_total"],
-            "paginas_com_alerta": client_report["paginas_com_alerta"],
-            "paginas_sem_texto": client_report["paginas_sem_texto"],
-            "paginas_baixa_cobertura": client_report["paginas_baixa_cobertura"],
-            "paginas_sem_ancora": client_report["paginas_sem_ancora"],
-            "visual_qa_status": client_report["visual_qa_status"],
-            "visual_qa_percent": client_report["visual_qa_percent"],
-        },
+        "client_report": client_report,
     }
     return JSONResponse(content=response)
 
