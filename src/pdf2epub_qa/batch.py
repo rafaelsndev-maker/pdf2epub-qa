@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from .converter import convert_pdf_to_epub
-from .epub_builder import LAYOUT_FIXED, LAYOUT_REFLOW
+from .epub_builder import LAYOUT_AUTO, LAYOUT_FIXED, LAYOUT_REFLOW
 
 
 @dataclass
@@ -19,6 +19,7 @@ class BatchItemResult:
     pages: int | None
     images: int | None
     sections: int | None
+    layout_mode: str | None
 
 
 def discover_pdf_inputs(paths: list[Path], recursive: bool = True) -> list[Path]:
@@ -78,6 +79,7 @@ def _convert_one(
             pages=result.pages,
             images=result.images,
             sections=result.sections,
+            layout_mode=result.layout_mode,
         )
     except Exception as exc:
         return BatchItemResult(
@@ -88,6 +90,7 @@ def _convert_one(
             pages=None,
             images=None,
             sections=None,
+            layout_mode=None,
         )
 
 
@@ -97,13 +100,13 @@ def convert_pdfs_batch(
     workers: int = 2,
     recursive: bool = True,
     lang: str = "pt-BR",
-    layout_mode: str = LAYOUT_REFLOW,
+    layout_mode: str = LAYOUT_AUTO,
     author: str | None = None,
     title_from_filename: bool = True,
     on_item_done: Callable[[BatchItemResult, int, int], None] | None = None,
 ) -> dict:
-    if layout_mode not in {LAYOUT_REFLOW, LAYOUT_FIXED}:
-        raise RuntimeError("layout invalido. Use reflow ou fixed.")
+    if layout_mode not in {LAYOUT_REFLOW, LAYOUT_FIXED, LAYOUT_AUTO}:
+        raise RuntimeError("layout invalido. Use reflow, fixed ou auto.")
 
     files = discover_pdf_inputs(input_paths, recursive=recursive)
     if not files:
@@ -137,6 +140,10 @@ def convert_pdfs_batch(
     results.sort(key=lambda item: item.input_pdf.lower())
     failed = [item for item in results if item.status == "error"]
     success = [item for item in results if item.status == "ok"]
+    layout_distribution = {
+        LAYOUT_REFLOW: sum(1 for item in success if item.layout_mode == LAYOUT_REFLOW),
+        LAYOUT_FIXED: sum(1 for item in success if item.layout_mode == LAYOUT_FIXED),
+    }
 
     finished_at = datetime.now(UTC)
     duration_s = (finished_at - started_at).total_seconds()
@@ -147,6 +154,7 @@ def convert_pdfs_batch(
         "duration_seconds": round(duration_s, 3),
         "workers": workers,
         "layout": layout_mode,
+        "layout_distribution": layout_distribution,
         "lang": lang,
         "output_dir": str(output_dir),
         "input_count": len(files),
@@ -156,6 +164,9 @@ def convert_pdfs_batch(
         "results": [asdict(item) for item in results],
         "retry_hint": {
             "message": "Rode novamente apenas os arquivos em failed_pdfs.",
-            "example": "pdf2epub batch-convert <pdfs_com_erro> -o <pasta_saida> --layout reflow",
+            "example": (
+                "pdf2epub batch-convert <pdfs_com_erro> "
+                f"-o <pasta_saida> --layout {layout_mode}"
+            ),
         },
     }

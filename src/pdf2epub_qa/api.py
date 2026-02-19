@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -8,15 +10,18 @@ import tempfile
 import unicodedata
 import zipfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import quote, unquote
 from uuid import uuid4
+from xml.etree import ElementTree as ET
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .batch import convert_pdfs_batch
 from .converter import convert_pdf_to_epub
+from .epub_builder import LAYOUT_AUTO, LAYOUT_FIXED, LAYOUT_REFLOW
 from .qa import review_pdf_epub
 from .reporting import build_user_summary
 
@@ -25,6 +30,8 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="pdf2epub-qa")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
+
+ALLOWED_LAYOUTS = {LAYOUT_REFLOW, LAYOUT_FIXED, LAYOUT_AUTO}
 
 
 def _save_upload(upload: UploadFile, target: Path) -> None:
@@ -78,6 +85,164 @@ def _batch_status(success_count: int, failed_count: int) -> str:
     if success_count > 0:
         return "parcial"
     return "erro"
+
+
+_EPUB_MEDIA_TYPES = {
+    ".css": "text/css",
+    ".gif": "image/gif",
+    ".htm": "text/html",
+    ".html": "text/html",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".js": "application/javascript",
+    ".ncx": "application/x-dtbncx+xml",
+    ".otf": "font/otf",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".ttf": "font/ttf",
+    ".webp": "image/webp",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".xhtml": "application/xhtml+xml",
+    ".xml": "application/xml",
+}
+
+
+def _normalize_epub_path(path_value: str) -> str:
+    raw = (path_value or "").replace("\\", "/")
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise HTTPException(status_code=400, detail="Caminho interno invalido no EPUB.")
+            parts.pop()
+            continue
+        parts.append(part)
+    if not parts:
+        raise HTTPException(status_code=400, detail="Caminho interno vazio no EPUB.")
+    return "/".join(parts)
+
+
+def _resolve_output_epub(path_ref: str) -> Path:
+    raw = unquote(path_ref or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Informe o caminho do EPUB.")
+
+    rel = raw
+    if rel.startswith("/outputs/"):
+        rel = rel[len("/outputs/") :]
+    rel = rel.replace("\\", "/").lstrip("/")
+    if not rel:
+        raise HTTPException(status_code=400, detail="Caminho do EPUB invalido.")
+
+    candidate = (OUTPUT_DIR / rel).resolve()
+    base_dir = OUTPUT_DIR.resolve()
+    try:
+        candidate.relative_to(base_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Caminho fora de outputs/.") from exc
+
+    if candidate.suffix.lower() != ".epub":
+        raise HTTPException(status_code=400, detail="Arquivo precisa ter extensao .epub.")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="EPUB nao encontrado.")
+    return candidate
+
+
+def _encode_epub_token(epub_path: Path) -> str:
+    rel = epub_path.resolve().relative_to(OUTPUT_DIR.resolve()).as_posix()
+    encoded = base64.urlsafe_b64encode(rel.encode("utf-8")).decode("ascii")
+    return encoded.rstrip("=")
+
+
+def _decode_epub_token(token: str) -> Path:
+    padded = token + ("=" * (-len(token) % 4))
+    try:
+        rel = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Token de EPUB invalido.") from exc
+    return _resolve_output_epub(rel)
+
+
+def _read_epub_package(epub_path: Path) -> dict[str, object]:
+    try:
+        with zipfile.ZipFile(epub_path, "r") as zf:
+            try:
+                container_xml = zf.read("META-INF/container.xml")
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=400, detail="EPUB invalido: container.xml ausente."
+                ) from exc
+
+            try:
+                container_root = ET.fromstring(container_xml)
+            except ET.ParseError as exc:
+                raise HTTPException(
+                    status_code=400, detail="EPUB invalido: container.xml malformado."
+                ) from exc
+
+            rootfile = container_root.find(".//{*}rootfile")
+            if rootfile is None:
+                raise HTTPException(status_code=400, detail="EPUB invalido: rootfile ausente.")
+
+            opf_raw = (rootfile.attrib.get("full-path") or "").strip()
+            if not opf_raw:
+                raise HTTPException(
+                    status_code=400, detail="EPUB invalido: caminho OPF nao informado."
+                )
+
+            opf_path = _normalize_epub_path(opf_raw)
+            try:
+                opf_xml = zf.read(opf_path)
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=400, detail="EPUB invalido: pacote OPF nao encontrado."
+                ) from exc
+
+            try:
+                opf_root = ET.fromstring(opf_xml)
+            except ET.ParseError as exc:
+                raise HTTPException(
+                    status_code=400, detail="EPUB invalido: OPF malformado."
+                ) from exc
+
+            opf_dir = PurePosixPath(opf_path).parent
+            manifest_by_id: dict[str, str] = {}
+            for item in opf_root.findall(".//{*}manifest/{*}item"):
+                item_id = (item.attrib.get("id") or "").strip()
+                href = (item.attrib.get("href") or "").strip()
+                if not item_id or not href:
+                    continue
+                full_path = _normalize_epub_path(str(opf_dir / PurePosixPath(href)))
+                manifest_by_id[item_id] = full_path
+
+            spine_paths: list[str] = []
+            for itemref in opf_root.findall(".//{*}spine/{*}itemref"):
+                idref = (itemref.attrib.get("idref") or "").strip()
+                path = manifest_by_id.get(idref)
+                if path and path not in spine_paths:
+                    spine_paths.append(path)
+
+            title_el = opf_root.find(".//{*}metadata/{*}title")
+            if title_el is None:
+                title_el = opf_root.find(".//{*}title")
+            title = (title_el.text or "").strip() if title_el is not None else ""
+            return {"title": title or epub_path.stem, "spine": spine_paths}
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(
+            status_code=400, detail="Arquivo EPUB invalido (zip corrompido)."
+        ) from exc
+
+
+def _media_type_for_epub_item(item_path: str) -> str:
+    suffix = Path(item_path).suffix.lower()
+    custom = _EPUB_MEDIA_TYPES.get(suffix)
+    if custom:
+        return custom
+    guessed, _ = mimetypes.guess_type(item_path)
+    return guessed or "application/octet-stream"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -245,7 +410,8 @@ async def ui() -> HTMLResponse:
           <div>
             <label for="layout">Layout</label>
             <select id="layout" name="layout">
-              <option value="fixed" selected>fixed (visual igual ao PDF)</option>
+              <option value="auto" selected>auto (escolha automatica)</option>
+              <option value="fixed">fixed (visual igual ao PDF)</option>
               <option value="reflow">reflow (texto fluido)</option>
             </select>
           </div>
@@ -257,6 +423,7 @@ async def ui() -> HTMLResponse:
         <div id="singleResult" class="result">
           <div class="links">
             <a id="epubLink" href="#" target="_blank" rel="noopener">Baixar EPUB</a>
+            <a id="readerLink" href="#" target="_blank" rel="noopener">Abrir no leitor EPUB</a>
             <a id="reportLink" href="#" target="_blank" rel="noopener">Baixar relatorio JSON</a>
           </div>
           <div id="singleChips" class="chips"></div>
@@ -291,8 +458,9 @@ async def ui() -> HTMLResponse:
           <div>
             <label for="batchLayout">Layout</label>
             <select id="batchLayout" name="layout">
-              <option value="reflow" selected>reflow (mais leve)</option>
-              <option value="fixed">fixed (visual igual ao PDF)</option>
+              <option value="auto" selected>auto por arquivo (recomendado)</option>
+              <option value="reflow">reflow para todos (mais leve)</option>
+              <option value="fixed">fixed para todos (visual igual ao PDF)</option>
             </select>
           </div>
           <div>
@@ -322,6 +490,37 @@ async def ui() -> HTMLResponse:
           <pre id="batchSummary"></pre>
         </div>
       </div>
+
+      <div class="card">
+        <h2>Leitor EPUB (upload rapido)</h2>
+        <p class="sub">Envie um arquivo EPUB e abra direto no leitor.</p>
+        <form id="quickReaderForm" class="grid">
+          <div class="full">
+            <label for="quickEpub">Arquivo EPUB</label>
+            <input
+              id="quickEpub"
+              name="epub"
+              type="file"
+              accept=".epub,application/epub+zip"
+              required
+            />
+          </div>
+          <div class="full">
+            <button id="quickReaderBtn" type="submit">Enviar e abrir leitor</button>
+          </div>
+        </form>
+        <div id="quickReaderStatus" class="status"></div>
+        <div id="quickReaderResult" class="result">
+          <div class="links">
+            <a id="quickReaderOpenLink" href="#" target="_blank" rel="noopener">
+              Abrir no leitor EPUB
+            </a>
+            <a id="quickReaderDownloadLink" href="#" target="_blank" rel="noopener">
+              Baixar EPUB
+            </a>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script>
@@ -332,6 +531,7 @@ async def ui() -> HTMLResponse:
       const singleChips = document.getElementById("singleChips");
       const singleSummary = document.getElementById("singleSummary");
       const epubLink = document.getElementById("epubLink");
+      const readerLink = document.getElementById("readerLink");
       const reportLink = document.getElementById("reportLink");
 
       const batchForm = document.getElementById("batchForm");
@@ -343,6 +543,13 @@ async def ui() -> HTMLResponse:
       const batchZipLink = document.getElementById("batchZipLink");
       const batchReportLink = document.getElementById("batchReportLink");
       const batchRetryLink = document.getElementById("batchRetryLink");
+
+      const quickReaderForm = document.getElementById("quickReaderForm");
+      const quickReaderStatus = document.getElementById("quickReaderStatus");
+      const quickReaderResult = document.getElementById("quickReaderResult");
+      const quickReaderBtn = document.getElementById("quickReaderBtn");
+      const quickReaderOpenLink = document.getElementById("quickReaderOpenLink");
+      const quickReaderDownloadLink = document.getElementById("quickReaderDownloadLink");
 
       function showStatus(el, message, background = "#eff6ff", color = "#1849a9") {
         el.style.display = "block";
@@ -382,6 +589,15 @@ async def ui() -> HTMLResponse:
         lines.push(`Sucesso: ${summary.sucesso}`);
         lines.push(`Erros: ${summary.erros}`);
         lines.push(`Workers: ${summary.workers}`);
+        if (summary.layout_solicitado) {
+          lines.push(`Layout solicitado: ${summary.layout_solicitado}`);
+        }
+        if (summary.layout_contagem) {
+          lines.push(
+            `Layout escolhido por arquivo: reflow=${summary.layout_contagem.reflow || 0}, `
+            + `fixed=${summary.layout_contagem.fixed || 0}`
+          );
+        }
         if ((summary.falhas || []).length > 0) {
           lines.push("");
           lines.push("Arquivos com erro:");
@@ -407,6 +623,8 @@ async def ui() -> HTMLResponse:
 
           showStatus(singleStatus, "Conversao concluida com sucesso.", "#ecfdf3", "#067647");
           epubLink.href = payload.files.epub_download_url;
+          readerLink.href =
+            `/epub-reader?epub=${encodeURIComponent(payload.files.epub_download_url)}`;
           reportLink.href = payload.files.report_download_url;
 
           const s = payload.summary;
@@ -473,11 +691,421 @@ async def ui() -> HTMLResponse:
           batchBtn.disabled = false;
         }
       });
+
+      quickReaderForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const epubInput = document.getElementById("quickEpub");
+        const file = epubInput.files && epubInput.files[0];
+        if (!file) {
+          showStatus(quickReaderStatus, "Selecione um arquivo .epub.", "#fef3f2", "#b42318");
+          return;
+        }
+
+        const data = new FormData();
+        data.append("epub", file);
+        quickReaderResult.style.display = "none";
+        quickReaderBtn.disabled = true;
+        showStatus(quickReaderStatus, "Enviando EPUB para o leitor...");
+
+        try {
+          const response = await fetch("/epub-upload", { method: "POST", body: data });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || "Falha ao enviar EPUB.");
+
+          quickReaderOpenLink.href = payload.epub_reader_url;
+          quickReaderDownloadLink.href = payload.epub_download_url;
+          quickReaderResult.style.display = "block";
+          showStatus(quickReaderStatus, "EPUB pronto para leitura.", "#ecfdf3", "#067647");
+        } catch (err) {
+          showStatus(
+            quickReaderStatus,
+            err.message || "Erro ao enviar EPUB.",
+            "#fef3f2",
+            "#b42318"
+          );
+        } finally {
+          quickReaderBtn.disabled = false;
+        }
+      });
     </script>
   </body>
 </html>
 """
     return HTMLResponse(content=html)
+
+
+@app.get("/epub-reader", response_class=HTMLResponse)
+async def epub_reader_ui(epub: str | None = None) -> HTMLResponse:
+    html = """
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Leitor EPUB</title>
+    <style>
+      :root {
+        --bg: #f4f7fb;
+        --card: #ffffff;
+        --text: #1b2430;
+        --muted: #667085;
+        --primary: #0b63ce;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        color: var(--text);
+        background: radial-gradient(circle at top right, #dbeafe, #f4f7fb 35%);
+      }
+      .wrap {
+        max-width: 1200px;
+        margin: 20px auto;
+        padding: 0 16px 20px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid #e4e7ec;
+        border-radius: 14px;
+        padding: 14px;
+        box-shadow: 0 8px 24px rgba(16, 24, 40, 0.06);
+        margin-bottom: 12px;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 24px;
+      }
+      .sub {
+        margin: 0 0 12px;
+        color: var(--muted);
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+      }
+      .row + .row {
+        margin-top: 8px;
+      }
+      input, select, button {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid #d0d5dd;
+        padding: 10px 12px;
+        font-size: 14px;
+      }
+      button {
+        background: var(--primary);
+        color: white;
+        border: none;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .status {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: #eff6ff;
+        color: #1849a9;
+        font-size: 14px;
+      }
+      .toolbar {
+        margin-top: 10px;
+        display: none;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .toolbar button {
+        width: auto;
+        min-width: 90px;
+      }
+      .toolbar select {
+        width: min(420px, 100%);
+      }
+      .toolbar a {
+        color: var(--primary);
+        font-weight: 600;
+        text-decoration: none;
+      }
+      #viewer {
+        width: 100%;
+        min-height: 75vh;
+        border: 1px solid #d0d5dd;
+        border-radius: 12px;
+        background: white;
+      }
+      @media (max-width: 760px) {
+        .row { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Leitor EPUB</h1>
+        <p class="sub">Abra o EPUB gerado, envie um novo EPUB e navegue pelos capitulos.</p>
+        <form id="loadForm" class="row">
+          <input
+            id="epubPath"
+            type="text"
+            placeholder="/outputs/seu-arquivo.epub"
+            aria-label="Caminho do EPUB"
+          />
+          <button type="submit">Carregar</button>
+        </form>
+        <form id="uploadForm" class="row">
+          <input
+            id="epubUpload"
+            type="file"
+            accept=".epub,application/epub+zip"
+            aria-label="Upload de EPUB"
+          />
+          <button id="uploadBtn" type="submit">Upload rapido</button>
+        </form>
+        <div id="status" class="status">Informe um EPUB para iniciar.</div>
+        <div id="toolbar" class="toolbar">
+          <button id="prevBtn" type="button">Anterior</button>
+          <select id="chapterSelect" aria-label="Capitulos"></select>
+          <button id="nextBtn" type="button">Proximo</button>
+          <a id="downloadLink" href="#" target="_blank" rel="noopener">Baixar EPUB</a>
+        </div>
+      </div>
+      <iframe id="viewer" title="Visualizador EPUB"></iframe>
+    </div>
+
+    <script>
+      const INITIAL_EPUB = __INITIAL_EPUB__;
+
+      const loadForm = document.getElementById("loadForm");
+      const uploadForm = document.getElementById("uploadForm");
+      const epubPath = document.getElementById("epubPath");
+      const epubUpload = document.getElementById("epubUpload");
+      const uploadBtn = document.getElementById("uploadBtn");
+      const statusEl = document.getElementById("status");
+      const toolbar = document.getElementById("toolbar");
+      const chapterSelect = document.getElementById("chapterSelect");
+      const prevBtn = document.getElementById("prevBtn");
+      const nextBtn = document.getElementById("nextBtn");
+      const downloadLink = document.getElementById("downloadLink");
+      const viewer = document.getElementById("viewer");
+
+      let chapters = [];
+      let currentIndex = 0;
+
+      function showStatus(message, background = "#eff6ff", color = "#1849a9") {
+        statusEl.style.background = background;
+        statusEl.style.color = color;
+        statusEl.textContent = message;
+      }
+
+      function updateViewer() {
+        if (chapters.length === 0) {
+          viewer.removeAttribute("src");
+          return;
+        }
+        const chapter = chapters[currentIndex];
+        chapterSelect.value = String(currentIndex);
+        prevBtn.disabled = currentIndex <= 0;
+        nextBtn.disabled = currentIndex >= chapters.length - 1;
+        viewer.src = chapter.url;
+      }
+
+      async function loadEpub(pathValue) {
+        const value = (pathValue || "").trim();
+        if (!value) {
+          showStatus("Informe o caminho do EPUB.", "#fef3f2", "#b42318");
+          return;
+        }
+
+        toolbar.style.display = "none";
+        chapters = [];
+        viewer.removeAttribute("src");
+        showStatus("Carregando EPUB...");
+
+        try {
+          const response = await fetch(`/epub-meta?epub=${encodeURIComponent(value)}`);
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.error || "Nao foi possivel carregar o EPUB.");
+          }
+
+          chapters = payload.chapters || [];
+          if (chapters.length === 0) {
+            throw new Error("EPUB sem capitulos legiveis.");
+          }
+
+          chapterSelect.innerHTML = "";
+          chapters.forEach((item, index) => {
+            const option = document.createElement("option");
+            option.value = String(index);
+            option.textContent = `${index + 1}. ${item.label}`;
+            chapterSelect.appendChild(option);
+          });
+
+          currentIndex = 0;
+          downloadLink.href = payload.download_url;
+          toolbar.style.display = "flex";
+          updateViewer();
+          showStatus(
+            `Leitor carregado: ${payload.title} (${chapters.length} capitulos).`,
+            "#ecfdf3",
+            "#067647"
+          );
+        } catch (err) {
+          showStatus(err.message || "Erro ao carregar EPUB.", "#fef3f2", "#b42318");
+        }
+      }
+
+      loadForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        loadEpub(epubPath.value);
+      });
+
+      uploadForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const file = epubUpload.files && epubUpload.files[0];
+        if (!file) {
+          showStatus("Selecione um arquivo .epub.", "#fef3f2", "#b42318");
+          return;
+        }
+
+        uploadBtn.disabled = true;
+        showStatus("Enviando EPUB...");
+
+        try {
+          const data = new FormData();
+          data.append("epub", file);
+          const response = await fetch("/epub-upload", { method: "POST", body: data });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.error || "Falha no upload do EPUB.");
+          }
+
+          epubPath.value = payload.epub_download_url;
+          await loadEpub(payload.epub_download_url);
+        } catch (err) {
+          showStatus(err.message || "Erro ao enviar EPUB.", "#fef3f2", "#b42318");
+        } finally {
+          uploadBtn.disabled = false;
+        }
+      });
+
+      chapterSelect.addEventListener("change", () => {
+        currentIndex = Number(chapterSelect.value) || 0;
+        updateViewer();
+      });
+
+      prevBtn.addEventListener("click", () => {
+        currentIndex = Math.max(0, currentIndex - 1);
+        updateViewer();
+      });
+
+      nextBtn.addEventListener("click", () => {
+        currentIndex = Math.min(chapters.length - 1, currentIndex + 1);
+        updateViewer();
+      });
+
+      if (INITIAL_EPUB) {
+        epubPath.value = INITIAL_EPUB;
+        loadEpub(INITIAL_EPUB);
+      }
+    </script>
+  </body>
+</html>
+"""
+    html = html.replace("__INITIAL_EPUB__", json.dumps(epub or "", ensure_ascii=False))
+    return HTMLResponse(content=html)
+
+
+@app.get("/epub-meta")
+async def epub_meta_endpoint(epub: str) -> JSONResponse:
+    try:
+        epub_path = _resolve_output_epub(epub)
+        package = _read_epub_package(epub_path)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+
+    token = _encode_epub_token(epub_path)
+    chapters: list[dict[str, str]] = []
+    for item_path in package["spine"]:
+        if not item_path.lower().endswith((".xhtml", ".html", ".htm")):
+            continue
+        chapters.append(
+            {
+                "path": item_path,
+                "label": PurePosixPath(item_path).name or item_path,
+                "url": f"/epub-resource/{token}/{quote(item_path, safe='/')}",
+            }
+        )
+
+    if not chapters:
+        return JSONResponse(
+            status_code=400, content={"error": "EPUB nao possui capitulos XHTML no spine."}
+        )
+
+    return JSONResponse(
+        content={
+            "title": package["title"],
+            "download_url": _output_url(epub_path),
+            "epub_url": _output_url(epub_path),
+            "chapters": chapters,
+        }
+    )
+
+
+@app.get("/epub-resource/{epub_token}/{item_path:path}")
+async def epub_resource_endpoint(epub_token: str, item_path: str):
+    try:
+        epub_path = _decode_epub_token(epub_token)
+        normalized_item = _normalize_epub_path(item_path)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+
+    try:
+        with zipfile.ZipFile(epub_path, "r") as zf:
+            try:
+                content = zf.read(normalized_item)
+            except KeyError:
+                return JSONResponse(
+                    status_code=404, content={"error": "Recurso nao encontrado dentro do EPUB."}
+                )
+    except zipfile.BadZipFile:
+        return JSONResponse(status_code=400, content={"error": "Arquivo EPUB invalido."})
+
+    return Response(content=content, media_type=_media_type_for_epub_item(normalized_item))
+
+
+@app.post("/epub-upload")
+async def epub_upload_endpoint(epub_file: UploadFile = File(..., alias="epub")) -> JSONResponse:
+    input_name = epub_file.filename or "input.epub"
+    if not input_name.lower().endswith(".epub"):
+        return JSONResponse(status_code=400, content={"error": "Envie um arquivo .epub valido."})
+
+    base_name = _safe_stem(input_name)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    token = uuid4().hex[:8]
+    epub_path = OUTPUT_DIR / f"{base_name}-{stamp}-{token}.epub"
+
+    try:
+        _save_upload(epub_file, epub_path)
+        _read_epub_package(epub_path)
+    except HTTPException as exc:
+        epub_path.unlink(missing_ok=True)
+        return JSONResponse(status_code=400, content={"error": str(exc.detail)})
+    except Exception as exc:
+        epub_path.unlink(missing_ok=True)
+        return JSONResponse(status_code=500, content={"error": f"Falha interna: {exc}"})
+
+    epub_url = _output_url(epub_path)
+    return JSONResponse(
+        content={
+            "ok": True,
+            "epub_name": epub_path.name,
+            "epub_download_url": epub_url,
+            "epub_reader_url": f"/epub-reader?epub={quote(epub_url, safe='')}",
+        }
+    )
 
 
 @app.post("/convert-and-review")
@@ -486,11 +1114,15 @@ async def convert_and_review_endpoint(
     title: str | None = Form(None),
     author: str | None = Form(None),
     lang: str = Form("pt-BR"),
-    layout: str = Form("fixed"),
+    layout: str = Form(LAYOUT_AUTO),
 ) -> JSONResponse:
     input_name = pdf.filename or "input.pdf"
     if not input_name.lower().endswith(".pdf"):
         return JSONResponse(status_code=400, content={"error": "Envie um arquivo .pdf valido."})
+    if layout not in ALLOWED_LAYOUTS:
+        return JSONResponse(
+            status_code=400, content={"error": "layout invalido. Use reflow, fixed ou auto."}
+        )
 
     base_name = _safe_stem(input_name)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -503,7 +1135,7 @@ async def convert_and_review_endpoint(
 
     try:
         _save_upload(pdf, pdf_path)
-        convert_pdf_to_epub(
+        conversion_result = convert_pdf_to_epub(
             pdf_path=pdf_path,
             output_path=epub_path,
             title=title,
@@ -521,12 +1153,17 @@ async def convert_and_review_endpoint(
     client_report = build_user_summary(report)
     response = {
         "ok": True,
+        "conversion": {
+            "layout_requested": layout,
+            "layout_selected": conversion_result.layout_mode,
+        },
         "files": {
             "output_dir": str(OUTPUT_DIR),
             "pdf_name": pdf_path.name,
             "epub_name": epub_path.name,
             "report_name": report_path.name,
             "epub_download_url": _output_url(epub_path),
+            "epub_reader_url": f"/epub-reader?epub={quote(_output_url(epub_path), safe='')}",
             "report_download_url": _output_url(report_path),
         },
         "summary": client_report,
@@ -539,13 +1176,13 @@ async def convert_and_review_endpoint(
 async def batch_convert_upload_endpoint(
     pdfs: list[UploadFile] = File(...),
     lang: str = Form("pt-BR"),
-    layout: str = Form("reflow"),
+    layout: str = Form(LAYOUT_AUTO),
     workers: int = Form(2),
     author: str | None = Form(None),
 ) -> JSONResponse:
-    if layout not in {"reflow", "fixed"}:
+    if layout not in ALLOWED_LAYOUTS:
         return JSONResponse(
-            status_code=400, content={"error": "layout invalido. Use reflow ou fixed."}
+            status_code=400, content={"error": "layout invalido. Use reflow, fixed ou auto."}
         )
 
     max_workers = max(1, min(8, os.cpu_count() or 2))
@@ -592,6 +1229,7 @@ async def batch_convert_upload_endpoint(
                 "pages": item["pages"],
                 "images": item["images"],
                 "sections": item["sections"],
+                "layout_mode": item["layout_mode"],
                 "output_epub_name": Path(item["output_epub"]).name if ok else None,
                 "output_epub_url": _output_url(Path(item["output_epub"])) if ok else None,
             }
@@ -605,6 +1243,7 @@ async def batch_convert_upload_endpoint(
             "duration_seconds": report["duration_seconds"],
             "workers": report["workers"],
             "layout": report["layout"],
+            "layout_distribution": report["layout_distribution"],
             "lang": report["lang"],
             "output_dir": report["output_dir"],
             "input_count": report["input_count"],
@@ -645,6 +1284,8 @@ async def batch_convert_upload_endpoint(
             "sucesso": report["success_count"],
             "erros": report["failed_count"],
             "workers": report["workers"],
+            "layout_solicitado": layout,
+            "layout_contagem": report["layout_distribution"],
             "duracao_segundos": report["duration_seconds"],
             "falhas": failed_names,
         }
@@ -677,12 +1318,17 @@ async def convert_endpoint(
     title: str | None = Form(None),
     author: str | None = Form(None),
     lang: str = Form("pt-BR"),
-    layout: str = Form("reflow"),
+    layout: str = Form(LAYOUT_AUTO),
 ):
     tmpdir = Path(tempfile.mkdtemp())
     pdf_path = tmpdir / "input.pdf"
     epub_path = tmpdir / "output.epub"
     _save_upload(pdf, pdf_path)
+    if layout not in ALLOWED_LAYOUTS:
+        background_tasks.add_task(shutil.rmtree, tmpdir, ignore_errors=True)
+        return JSONResponse(
+            status_code=400, content={"error": "layout invalido. Use reflow, fixed ou auto."}
+        )
 
     try:
         convert_pdf_to_epub(

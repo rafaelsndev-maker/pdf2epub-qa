@@ -14,6 +14,7 @@ from .utils import detect_heading, text_to_paragraphs
 
 LAYOUT_REFLOW = "reflow"
 LAYOUT_FIXED = "fixed"
+LAYOUT_AUTO = "auto"
 
 IMAGE_MEDIA_TYPES = {
     "png": "image/png",

@@ -41,6 +41,9 @@ def test_batch_convert_with_failure_report():
     assert report["success_count"] == 2
     assert report["failed_count"] == 1
     assert len(report["failed_pdfs"]) == 1
+    assert report["layout"] == "auto"
+    assert report["layout_distribution"]["reflow"] >= 2
+    assert report["layout_distribution"]["fixed"] == 0
     assert output_dir.joinpath("ok-1.epub").exists()
     assert output_dir.joinpath("ok-2.epub").exists()
 

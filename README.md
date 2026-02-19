@@ -62,7 +62,13 @@ pdf2epub convert "input.pdf" -o "out.epub" --title "Meu Livro" --author "Autor" 
 pdf2epub convert "input.pdf" -o "out-fixed.epub" --layout fixed --title "Meu Livro" --lang "pt-BR"
 ```
 
-### 3) Revisar QA
+### 3) Deixar o conversor escolher automaticamente (auto)
+
+```bash
+pdf2epub convert "input.pdf" -o "out-auto.epub" --layout auto --title "Meu Livro" --lang "pt-BR"
+```
+
+### 4) Revisar QA
 
 ```bash
 pdf2epub review "input.pdf" "out.epub" -o "report.json"
@@ -72,7 +78,7 @@ Arquivos gerados no `review`:
 - `report.json`: relatorio tecnico completo.
 - `report.leigo.json`: resumo em linguagem simples.
 
-### 4) Converter varios PDFs de uma vez (lote)
+### 5) Converter varios PDFs de uma vez (lote)
 
 ```bash
 pdf2epub batch-convert "pasta_com_pdfs" -o "outputs/batch_epubs" --workers 2 --report "batch-report.json"
@@ -99,14 +105,18 @@ http://127.0.0.1:8000/
 Fluxo:
 - conversao unica:
   - selecione 1 PDF
-  - escolha `fixed` ou `reflow`
+  - escolha `auto`, `fixed` ou `reflow`
   - clique em `Converter e revisar`
   - baixe EPUB e JSON
+  - abra o EPUB no leitor web embutido
 - conversao em massa:
   - selecione varios PDFs (ou pasta)
-  - ajuste workers/layout
+  - ajuste workers/layout (`auto` escolhe por arquivo)
   - clique em `Converter em massa`
   - baixe `batch-epubs.zip` + relatorios JSON
+- leitor EPUB:
+  - informe o caminho em `outputs/` ou use `Upload rapido` de `.epub`
+  - navegue pelos capitulos no navegador
 
 Saidas ficam em `outputs/`.
 
@@ -117,12 +127,16 @@ Endpoints:
 - `POST /review`
 - `POST /convert-and-review`
 - `POST /batch-convert-upload`
+- `POST /epub-upload`
+- `GET /epub-reader?epub=/outputs/arquivo.epub`
+- `GET /epub-meta?epub=/outputs/arquivo.epub`
+- `GET /epub-resource/{token}/{item_path}`
 
 Exemplos:
 
 ```bash
-curl -F "pdf=@input.pdf" -F "layout=fixed" http://localhost:8000/convert --output out-fixed.epub
-curl -F "pdf=@input.pdf" -F "epub=@out-fixed.epub" http://localhost:8000/review
+curl -F "pdf=@input.pdf" -F "layout=auto" http://localhost:8000/convert --output out-auto.epub
+curl -F "pdf=@input.pdf" -F "epub=@out-auto.epub" http://localhost:8000/review
 ```
 
 ## Interpretacao dos relatorios
@@ -182,6 +196,7 @@ ruff check .
 ## Limitacoes MVP
 
 - Reflow nunca fica 1:1 com PDF.
+- `--layout auto` usa heuristica local e pode errar em PDFs com estrutura incomum.
 - OCR depende de Tesseract instalado no sistema.
 - Deteccao de capitulos ainda e heuristica.
 

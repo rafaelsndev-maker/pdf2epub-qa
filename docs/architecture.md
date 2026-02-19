@@ -4,6 +4,7 @@
 
 1. Extracao: PyMuPDF gera texto por pagina e imagens.
 2. Conversao:
+   - `auto`: escolhe entre `reflow` e `fixed` por heuristica (texto x imagens).
    - `reflow`: heuristica de titulo por pagina para formar capitulos.
    - `fixed`: renderiza cada pagina do PDF para imagem e gera EPUB pre-paginado.
 3. HTML/XHTML: gera ancoras `page-N` para QA.

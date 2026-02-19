@@ -41,6 +41,25 @@ def test_convert_and_review():
     assert len(report["issues"]) == result.pages
 
 
+def test_convert_auto_layout_uses_reflow_for_text_pdf():
+    run_dir = make_run_dir()
+    pdf_path = run_dir / "sample_auto.pdf"
+    epub_path = run_dir / "sample_auto.epub"
+
+    create_sample_pdf(pdf_path)
+    result = convert_pdf_to_epub(
+        pdf_path,
+        epub_path,
+        title="Teste Auto",
+        author="Autor",
+        lang="pt-BR",
+        layout_mode="auto",
+    )
+
+    assert epub_path.exists()
+    assert result.layout_mode == "reflow"
+
+
 def test_convert_fixed_layout_and_review():
     run_dir = make_run_dir()
     pdf_path = run_dir / "sample_fixed.pdf"

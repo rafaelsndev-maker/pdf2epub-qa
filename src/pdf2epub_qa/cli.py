@@ -8,7 +8,7 @@ import typer
 
 from .batch import BatchItemResult, convert_pdfs_batch
 from .converter import convert_pdf_to_epub
-from .epub_builder import LAYOUT_FIXED, LAYOUT_REFLOW
+from .epub_builder import LAYOUT_AUTO, LAYOUT_FIXED, LAYOUT_REFLOW
 from .qa import review_pdf_epub
 from .reporting import build_user_summary, format_user_summary
 
@@ -37,14 +37,14 @@ def convert(
     author: str | None = typer.Option(None, "--author", help="Autor do livro"),
     lang: str = typer.Option("pt-BR", "--lang", help="Idioma (pt-BR/en)"),
     layout: str = typer.Option(
-        LAYOUT_REFLOW,
+        LAYOUT_AUTO,
         "--layout",
-        help="Modo de layout: reflow (texto fluido) ou fixed (igual ao PDF).",
+        help="Modo de layout: auto, reflow (texto fluido) ou fixed (igual ao PDF).",
     ),
 ) -> None:
     _ensure_pdf(input_pdf)
-    if layout not in {LAYOUT_REFLOW, LAYOUT_FIXED}:
-        raise typer.BadParameter("layout invalido. Use reflow ou fixed.")
+    if layout not in {LAYOUT_REFLOW, LAYOUT_FIXED, LAYOUT_AUTO}:
+        raise typer.BadParameter("layout invalido. Use reflow, fixed ou auto.")
     output_path = output or input_pdf.with_suffix(".epub")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -124,9 +124,9 @@ def batch_convert(
         help="Relatorio JSON do lote (inclui arquivos com erro para retry).",
     ),
     layout: str = typer.Option(
-        LAYOUT_REFLOW,
+        LAYOUT_AUTO,
         "--layout",
-        help="Modo de layout: reflow (texto fluido) ou fixed (igual ao PDF).",
+        help="Modo de layout: auto, reflow (texto fluido) ou fixed (igual ao PDF).",
     ),
     lang: str = typer.Option("pt-BR", "--lang", help="Idioma (pt-BR/en)"),
     author: str | None = typer.Option(None, "--author", help="Autor padrao do lote"),
@@ -142,8 +142,8 @@ def batch_convert(
         help="Buscar PDFs recursivamente ao informar pastas.",
     ),
 ) -> None:
-    if layout not in {LAYOUT_REFLOW, LAYOUT_FIXED}:
-        raise typer.BadParameter("layout invalido. Use reflow ou fixed.")
+    if layout not in {LAYOUT_REFLOW, LAYOUT_FIXED, LAYOUT_AUTO}:
+        raise typer.BadParameter("layout invalido. Use reflow, fixed ou auto.")
 
     report_output.parent.mkdir(parents=True, exist_ok=True)
 

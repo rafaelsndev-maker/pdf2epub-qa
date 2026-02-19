@@ -39,7 +39,7 @@ def test_batch_convert_upload_endpoint(monkeypatch):
         api_module.batch_convert_upload_endpoint(
             pdfs=uploads,
             lang="pt-BR",
-            layout="reflow",
+            layout="auto",
             workers=2,
             author=None,
         )
@@ -51,4 +51,7 @@ def test_batch_convert_upload_endpoint(monkeypatch):
     assert payload["summary"]["total"] == 2
     assert payload["summary"]["sucesso"] == 2
     assert payload["summary"]["erros"] == 0
+    assert payload["summary"]["layout_solicitado"] == "auto"
+    assert payload["summary"]["layout_contagem"]["reflow"] == 2
+    assert payload["summary"]["layout_contagem"]["fixed"] == 0
     assert payload["files"]["report_download_url"].startswith("/outputs/")
