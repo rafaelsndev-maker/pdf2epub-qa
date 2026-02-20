@@ -60,6 +60,11 @@ def _convert_one(
     author: str | None,
     lang: str,
     layout_mode: str,
+    publisher: str | None,
+    rights: str | None,
+    description: str | None,
+    isbn: str | None,
+    collection: str | None,
 ) -> BatchItemResult:
     title = pdf_path.stem if title_from_filename else None
     try:
@@ -69,6 +74,11 @@ def _convert_one(
             title=title,
             author=author,
             lang=lang,
+            publisher=publisher,
+            rights=rights,
+            description=description,
+            isbn=isbn,
+            collection=collection,
             layout_mode=layout_mode,
         )
         return BatchItemResult(
@@ -102,6 +112,11 @@ def convert_pdfs_batch(
     lang: str = "pt-BR",
     layout_mode: str = LAYOUT_AUTO,
     author: str | None = None,
+    publisher: str | None = None,
+    rights: str | None = None,
+    description: str | None = None,
+    isbn: str | None = None,
+    collection: str | None = None,
     title_from_filename: bool = True,
     on_item_done: Callable[[BatchItemResult, int, int], None] | None = None,
 ) -> dict:
@@ -128,6 +143,11 @@ def convert_pdfs_batch(
                 author,
                 lang,
                 layout_mode,
+                publisher,
+                rights,
+                description,
+                isbn,
+                collection,
             ): pdf_path
             for pdf_path in files
         }

@@ -68,17 +68,42 @@ pdf2epub convert "input.pdf" -o "out-fixed.epub" --layout fixed --title "Meu Liv
 pdf2epub convert "input.pdf" -o "out-auto.epub" --layout auto --title "Meu Livro" --lang "pt-BR"
 ```
 
-### 4) Revisar QA
+### 4) Converter com metadados editoriais (ISBN/editora/direitos)
 
 ```bash
-pdf2epub review "input.pdf" "out.epub" -o "report.json"
+pdf2epub convert "input.pdf" -o "out-editorial.epub" --layout auto --publisher "Editora X" --rights "Todos os direitos reservados" --isbn "9781234567890" --collection "Colecao Y" --description "Descricao editorial"
+```
+
+### 5) Revisar QA + gate editorial
+
+```bash
+pdf2epub review "input.pdf" "out.epub" -o "report.json" --strict-epubcheck
 ```
 
 Arquivos gerados no `review`:
 - `report.json`: relatorio tecnico completo.
 - `report.leigo.json`: resumo em linguagem simples.
 
-### 5) Converter varios PDFs de uma vez (lote)
+### 6) Aprovar manualmente para publicacao
+
+```bash
+pdf2epub approve "out.epub" --approver "Nome Revisor" --notes "Aprovado apos revisao final"
+```
+
+### 7) Criar checklist de revisao humana por capitulo
+
+```bash
+pdf2epub chapter-review-init "out.epub" --reviewer "Nome Revisor"
+pdf2epub chapter-review-mark "out.epub" --chapter 1 --status approved --notes "Capitulo ok"
+```
+
+### 8) Validar liberacao editorial (falha se nao estiver pronto)
+
+```bash
+pdf2epub release-check "input.pdf" "out.epub" -o "editorial-report.json" --strict-epubcheck
+```
+
+### 9) Converter varios PDFs de uma vez (lote)
 
 ```bash
 pdf2epub batch-convert "pasta_com_pdfs" -o "outputs/batch_epubs" --workers 2 --report "batch-report.json"
@@ -128,6 +153,9 @@ Endpoints:
 - `POST /convert-and-review`
 - `POST /batch-convert-upload`
 - `POST /epub-upload`
+- `POST /editorial-approve`
+- `POST /editorial-chapter-review-init`
+- `POST /editorial-chapter-review-mark`
 - `GET /epub-reader?epub=/outputs/arquivo.epub`
 - `GET /epub-meta?epub=/outputs/arquivo.epub`
 - `GET /epub-resource/{token}/{item_path}`
@@ -148,10 +176,18 @@ Campos principais no tecnico (`report.json`):
 - `image_count_pdf` e `image_count_epub`: comparacao de imagens.
 - `issues`: status por pagina (`ok`, `low_coverage`, `missing_page`, `no_text`).
 - `visual_qa`: resultado da comparacao visual quando habilitada.
+- `editorial`: bloco editorial com:
+  - `structure` (landmarks, page-list, links internos, alt text etc.)
+  - `metadata` (ISBN, publisher/rights/description e acessibilidade)
+  - `epubcheck` (resultado da validacao formal)
+  - `approval` (aprovacao humana)
+  - `gate` (`release_ready` + lista de bloqueios)
 
 Campos principais no leigo (`report.leigo.json`):
 - `status_geral`
 - `mensagem`
+- `editorial_score`
+- `editorial_pronto_publicar`
 - `explicacao_simples`
 - `sinais_de_atencao`
 - `recomendacoes`
@@ -180,6 +216,29 @@ setx PDF2EPUB_QA_VISUAL_DPI 144
 setx PDF2EPUB_QA_VISUAL_THRESHOLD 0.985
 ```
 
+epubcheck (validacao formal EPUB):
+
+```powershell
+setx PDF2EPUB_QA_EPUBCHECK_JAR "C:\\ferramentas\\epubcheck\\epubcheck.jar"
+setx PDF2EPUB_QA_JAVA_CMD java
+```
+
+Gate de revisao por capitulo (opcional, mas recomendado para fluxo editorial):
+
+```powershell
+setx PDF2EPUB_QA_REQUIRE_CHAPTER_REVIEW 1
+```
+
+Metadados editoriais padrao (opcional):
+
+```powershell
+setx PDF2EPUB_QA_PUBLISHER "Sua Editora"
+setx PDF2EPUB_QA_RIGHTS "Todos os direitos reservados"
+setx PDF2EPUB_QA_DESCRIPTION "Descricao padrao da obra"
+setx PDF2EPUB_QA_COLLECTION "Colecao Padrao"
+setx PDF2EPUB_QA_ISBN "9781234567890"
+```
+
 ## Testes e qualidade
 
 ```bash
@@ -192,6 +251,7 @@ ruff check .
 - `Arquivo nao encontrado`: use caminho entre aspas se tiver espacos.
 - `pip` pedindo `python -m pip`: use sempre `python -m pip`.
 - OCR nao funciona: confirme `tesseract --list-langs` no terminal.
+- Gate editorial bloqueando: rode `pdf2epub approve` e depois `pdf2epub release-check`.
 
 ## Limitacoes MVP
 

@@ -12,6 +12,7 @@ import fitz
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
+from .editorial import build_editorial_report
 from .pdf_extractor import extract_pdf
 from .utils import env_flag, limit_text, normalize_text, tokenize
 
@@ -22,6 +23,14 @@ def normalize_epub_path(path: str) -> str:
 
 def is_rendered_page_asset(file_name: str) -> bool:
     return normalize_epub_path(file_name).startswith("fixed_pages/")
+
+
+def is_frontmatter_asset(file_name: str) -> bool:
+    normalized = normalize_epub_path(file_name)
+    base = posixpath.basename(normalized).lower()
+    if base in {"cover.png", "cover.jpg", "cover.jpeg", "cover.webp"}:
+        return True
+    return normalized.startswith("images/cover.")
 
 
 def extract_epub_text(epub_path: Path) -> tuple[str, dict[int, str], int]:
@@ -58,6 +67,8 @@ def extract_epub_text(epub_path: Path) -> tuple[str, dict[int, str], int]:
         if not item.media_type or not item.media_type.startswith("image/"):
             continue
         if is_rendered_page_asset(item.get_name()):
+            continue
+        if is_frontmatter_asset(item.get_name()):
             continue
         image_count += 1
     return full_text, page_text_map, image_count
@@ -99,6 +110,7 @@ def review_pdf_epub(
     pdf_path: Path,
     epub_path: Path,
     page_threshold: float = 0.9,
+    strict_epubcheck: bool = False,
 ) -> dict:
     pdf = extract_pdf(pdf_path)
     epub_text, epub_page_map, image_count_epub = extract_epub_text(epub_path)
@@ -172,6 +184,12 @@ def review_pdf_epub(
         "issues": issues,
         "visual_qa": build_visual_qa(pdf_path, epub_path),
     }
+    report["editorial"] = build_editorial_report(
+        pdf_path=pdf_path,
+        epub_path=epub_path,
+        qa_report=report,
+        strict_epubcheck=strict_epubcheck,
+    )
     return report
 
 

@@ -55,6 +55,11 @@ def convert_pdf_to_epub(
     title: str | None = None,
     author: str | None = None,
     lang: str | None = None,
+    publisher: str | None = None,
+    rights: str | None = None,
+    description: str | None = None,
+    isbn: str | None = None,
+    collection: str | None = None,
     layout_mode: str = LAYOUT_AUTO,
 ) -> ConversionResult:
     if layout_mode not in {LAYOUT_REFLOW, LAYOUT_FIXED, LAYOUT_AUTO}:
@@ -68,6 +73,11 @@ def convert_pdf_to_epub(
         title=title,
         author=author,
         lang=lang,
+        publisher=publisher,
+        rights=rights,
+        description=description,
+        isbn=isbn,
+        collection=collection,
         layout_mode=resolved_layout_mode,
         source_pdf_path=pdf_path,
     )

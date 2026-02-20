@@ -21,6 +21,11 @@ from fastapi.staticfiles import StaticFiles
 
 from .batch import convert_pdfs_batch
 from .converter import convert_pdf_to_epub
+from .editorial import (
+    create_chapter_review_template,
+    mark_chapter_review,
+    write_editorial_approval,
+)
 from .epub_builder import LAYOUT_AUTO, LAYOUT_FIXED, LAYOUT_REFLOW
 from .qa import review_pdf_epub
 from .reporting import build_user_summary
@@ -85,6 +90,21 @@ def _batch_status(success_count: int, failed_count: int) -> str:
     if success_count > 0:
         return "parcial"
     return "erro"
+
+
+def _as_optional_text(value: object | None) -> str | None:
+    if isinstance(value, str):
+        clean = value.strip()
+        return clean or None
+    return None
+
+
+def _as_bool(value: object | None, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
 
 
 _EPUB_MEDIA_TYPES = {
@@ -401,6 +421,36 @@ async def ui() -> HTMLResponse:
             <input id="author" name="author" type="text" placeholder="Nome do autor" />
           </div>
           <div>
+            <label for="publisher">Editora (opcional)</label>
+            <input id="publisher" name="publisher" type="text" placeholder="Nome da editora" />
+          </div>
+          <div>
+            <label for="isbn">ISBN (opcional)</label>
+            <input id="isbn" name="isbn" type="text" placeholder="978..." />
+          </div>
+          <div>
+            <label for="rights">Direitos (opcional)</label>
+            <input
+              id="rights"
+              name="rights"
+              type="text"
+              placeholder="Todos os direitos reservados"
+            />
+          </div>
+          <div>
+            <label for="collection">Colecao (opcional)</label>
+            <input id="collection" name="collection" type="text" placeholder="Serie editorial" />
+          </div>
+          <div class="full">
+            <label for="description">Descricao editorial (opcional)</label>
+            <input
+              id="description"
+              name="description"
+              type="text"
+              placeholder="Descricao para metadados EPUB"
+            />
+          </div>
+          <div>
             <label for="lang">Idioma</label>
             <select id="lang" name="lang">
               <option value="pt-BR">pt-BR</option>
@@ -413,6 +463,13 @@ async def ui() -> HTMLResponse:
               <option value="auto" selected>auto (escolha automatica)</option>
               <option value="fixed">fixed (visual igual ao PDF)</option>
               <option value="reflow">reflow (texto fluido)</option>
+            </select>
+          </div>
+          <div>
+            <label for="strictEpubcheck">Gate estrito</label>
+            <select id="strictEpubcheck" name="strict_epubcheck">
+              <option value="false" selected>nao</option>
+              <option value="true">sim (exigir epubcheck)</option>
             </select>
           </div>
           <div class="full">
@@ -470,6 +527,46 @@ async def ui() -> HTMLResponse:
           <div>
             <label for="batchAuthor">Autor padrao (opcional)</label>
             <input id="batchAuthor" name="author" type="text" placeholder="Autor para todos" />
+          </div>
+          <div>
+            <label for="batchPublisher">Editora padrao (opcional)</label>
+            <input
+              id="batchPublisher"
+              name="publisher"
+              type="text"
+              placeholder="Editora para todos"
+            />
+          </div>
+          <div>
+            <label for="batchIsbn">ISBN padrao (opcional)</label>
+            <input id="batchIsbn" name="isbn" type="text" placeholder="978..." />
+          </div>
+          <div>
+            <label for="batchRights">Direitos padrao (opcional)</label>
+            <input
+              id="batchRights"
+              name="rights"
+              type="text"
+              placeholder="Direitos para todos"
+            />
+          </div>
+          <div>
+            <label for="batchCollection">Colecao padrao (opcional)</label>
+            <input
+              id="batchCollection"
+              name="collection"
+              type="text"
+              placeholder="Colecao para todos"
+            />
+          </div>
+          <div class="full">
+            <label for="batchDescription">Descricao editorial padrao (opcional)</label>
+            <input
+              id="batchDescription"
+              name="description"
+              type="text"
+              placeholder="Descricao para metadados EPUB"
+            />
           </div>
           <div class="full">
             <button id="batchBtn" type="submit">Converter em massa</button>
@@ -629,12 +726,18 @@ async def ui() -> HTMLResponse:
 
           const s = payload.summary;
           const visual = s.visual_qa_percent == null ? "n/a" : `${s.visual_qa_percent}%`;
+          const editorial = s.editorial_pronto_publicar ? "ok" : "pendente";
+          const editorialScore =
+            s.editorial_score == null ? "n/a" : `${Number(s.editorial_score).toFixed(1)}`;
           singleChips.innerHTML = `
             <span class="${chipClass(s.status_geral)}">status: ${s.status_geral}</span>
             <span class="chip">texto: ${s.texto_preservado_percent}%</span>
             <span class="chip">paginas com alerta: ${s.paginas_com_alerta}</span>
             <span class="chip">visual: ${visual}</span>
             <span class="chip">imagens: ${s.imagens_pdf}/${s.imagens_epub}</span>
+            <span class="chip">editorial: ${editorial}</span>
+            <span class="chip">score editorial: ${editorialScore}</span>
+            <span class="chip">epubcheck: ${s.epubcheck_status || "n/a"}</span>
           `;
 
           singleSummary.textContent = renderSimpleSummary(payload.client_report);
@@ -1114,7 +1217,13 @@ async def convert_and_review_endpoint(
     title: str | None = Form(None),
     author: str | None = Form(None),
     lang: str = Form("pt-BR"),
+    publisher: str | None = Form(None),
+    rights: str | None = Form(None),
+    description: str | None = Form(None),
+    isbn: str | None = Form(None),
+    collection: str | None = Form(None),
     layout: str = Form(LAYOUT_AUTO),
+    strict_epubcheck: bool = Form(False),
 ) -> JSONResponse:
     input_name = pdf.filename or "input.pdf"
     if not input_name.lower().endswith(".pdf"):
@@ -1123,6 +1232,15 @@ async def convert_and_review_endpoint(
         return JSONResponse(
             status_code=400, content={"error": "layout invalido. Use reflow, fixed ou auto."}
         )
+    title = _as_optional_text(title)
+    author = _as_optional_text(author)
+    lang = _as_optional_text(lang) or "pt-BR"
+    publisher = _as_optional_text(publisher)
+    rights = _as_optional_text(rights)
+    description = _as_optional_text(description)
+    isbn = _as_optional_text(isbn)
+    collection = _as_optional_text(collection)
+    strict_epubcheck = _as_bool(strict_epubcheck, default=False)
 
     base_name = _safe_stem(input_name)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1141,9 +1259,14 @@ async def convert_and_review_endpoint(
             title=title,
             author=author,
             lang=lang,
+            publisher=publisher,
+            rights=rights,
+            description=description,
+            isbn=isbn,
+            collection=collection,
             layout_mode=layout,
         )
-        report = review_pdf_epub(pdf_path, epub_path)
+        report = review_pdf_epub(pdf_path, epub_path, strict_epubcheck=strict_epubcheck)
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     except RuntimeError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
@@ -1179,11 +1302,23 @@ async def batch_convert_upload_endpoint(
     layout: str = Form(LAYOUT_AUTO),
     workers: int = Form(2),
     author: str | None = Form(None),
+    publisher: str | None = Form(None),
+    rights: str | None = Form(None),
+    description: str | None = Form(None),
+    isbn: str | None = Form(None),
+    collection: str | None = Form(None),
 ) -> JSONResponse:
     if layout not in ALLOWED_LAYOUTS:
         return JSONResponse(
             status_code=400, content={"error": "layout invalido. Use reflow, fixed ou auto."}
         )
+    lang = _as_optional_text(lang) or "pt-BR"
+    author = _as_optional_text(author)
+    publisher = _as_optional_text(publisher)
+    rights = _as_optional_text(rights)
+    description = _as_optional_text(description)
+    isbn = _as_optional_text(isbn)
+    collection = _as_optional_text(collection)
 
     max_workers = max(1, min(8, os.cpu_count() or 2))
     workers = max(1, min(int(workers), max_workers))
@@ -1213,6 +1348,11 @@ async def batch_convert_upload_endpoint(
             lang=lang,
             layout_mode=layout,
             author=author,
+            publisher=publisher,
+            rights=rights,
+            description=description,
+            isbn=isbn,
+            collection=collection,
         )
 
         result_items: list[dict] = []
@@ -1318,6 +1458,11 @@ async def convert_endpoint(
     title: str | None = Form(None),
     author: str | None = Form(None),
     lang: str = Form("pt-BR"),
+    publisher: str | None = Form(None),
+    rights: str | None = Form(None),
+    description: str | None = Form(None),
+    isbn: str | None = Form(None),
+    collection: str | None = Form(None),
     layout: str = Form(LAYOUT_AUTO),
 ):
     tmpdir = Path(tempfile.mkdtemp())
@@ -1329,6 +1474,14 @@ async def convert_endpoint(
         return JSONResponse(
             status_code=400, content={"error": "layout invalido. Use reflow, fixed ou auto."}
         )
+    title = _as_optional_text(title)
+    author = _as_optional_text(author)
+    lang = _as_optional_text(lang) or "pt-BR"
+    publisher = _as_optional_text(publisher)
+    rights = _as_optional_text(rights)
+    description = _as_optional_text(description)
+    isbn = _as_optional_text(isbn)
+    collection = _as_optional_text(collection)
 
     try:
         convert_pdf_to_epub(
@@ -1337,6 +1490,11 @@ async def convert_endpoint(
             title=title,
             author=author,
             lang=lang,
+            publisher=publisher,
+            rights=rights,
+            description=description,
+            isbn=isbn,
+            collection=collection,
             layout_mode=layout,
         )
     except RuntimeError as exc:
@@ -1356,17 +1514,74 @@ async def review_endpoint(
     background_tasks: BackgroundTasks,
     pdf: UploadFile = File(...),
     epub_file: UploadFile = File(..., alias="epub"),
+    strict_epubcheck: bool = Form(False),
 ):
     tmpdir = Path(tempfile.mkdtemp())
     pdf_path = tmpdir / "input.pdf"
     epub_path = tmpdir / "input.epub"
     _save_upload(pdf, pdf_path)
     _save_upload(epub_file, epub_path)
+    strict_epubcheck = _as_bool(strict_epubcheck, default=False)
 
     try:
-        report = review_pdf_epub(pdf_path, epub_path)
+        report = review_pdf_epub(pdf_path, epub_path, strict_epubcheck=strict_epubcheck)
     except RuntimeError as exc:
         background_tasks.add_task(shutil.rmtree, tmpdir, ignore_errors=True)
         return JSONResponse(status_code=400, content={"error": str(exc)})
     background_tasks.add_task(shutil.rmtree, tmpdir, ignore_errors=True)
     return JSONResponse(content=report, background=background_tasks)
+
+
+@app.post("/editorial-approve")
+async def editorial_approve_endpoint(
+    epub: str = Form(...),
+    approver: str = Form(...),
+    notes: str | None = Form(None),
+) -> JSONResponse:
+    try:
+        epub_path = _resolve_output_epub(epub)
+        result = write_editorial_approval(epub_path=epub_path, approver=approver, notes=notes)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+    except RuntimeError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    return JSONResponse(content={"ok": True, **result})
+
+
+@app.post("/editorial-chapter-review-init")
+async def editorial_chapter_review_init_endpoint(
+    epub: str = Form(...),
+    reviewer: str | None = Form(None),
+) -> JSONResponse:
+    try:
+        epub_path = _resolve_output_epub(epub)
+        result = create_chapter_review_template(epub_path=epub_path, reviewer=reviewer)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+    except RuntimeError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    return JSONResponse(content={"ok": True, **result})
+
+
+@app.post("/editorial-chapter-review-mark")
+async def editorial_chapter_review_mark_endpoint(
+    epub: str = Form(...),
+    chapter: int = Form(...),
+    status: str = Form(...),
+    reviewer: str | None = Form(None),
+    notes: str | None = Form(None),
+) -> JSONResponse:
+    try:
+        epub_path = _resolve_output_epub(epub)
+        review = mark_chapter_review(
+            epub_path=epub_path,
+            chapter_index=int(chapter),
+            status=status,
+            reviewer=reviewer,
+            notes=notes,
+        )
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+    except RuntimeError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    return JSONResponse(content={"ok": True, "review": review})

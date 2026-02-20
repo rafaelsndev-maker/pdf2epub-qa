@@ -50,6 +50,14 @@ def build_user_summary(report: dict) -> dict:
     visual_qa = report.get("visual_qa", {})
     visual_status = visual_qa.get("status", "not_implemented")
     visual_percent = visual_qa.get("coverage_visual_percent")
+    editorial = report.get("editorial", {})
+    gate = editorial.get("gate", {}) if isinstance(editorial, dict) else {}
+    editorial_ready = bool(gate.get("release_ready", False))
+    editorial_blockers = [str(item) for item in gate.get("blockers", [])]
+    editorial_score = float(gate.get("score", 0.0))
+    epubcheck_status = str((editorial.get("epubcheck", {}) or {}).get("status", "na"))
+    chapter_review = (editorial.get("chapter_review", {}) or {})
+    chapter_review_ok = bool(chapter_review.get("approved", False))
 
     if coverage >= 98 and len(non_ok) == 0 and image_match:
         status = "excelente"
@@ -102,6 +110,17 @@ def build_user_summary(report: dict) -> dict:
         sinais_de_atencao.append(
             "Comparacao visual encontrou paginas com diferenca perceptivel."
         )
+    if not editorial_ready:
+        sinais_de_atencao.append("Gate editorial ainda nao aprovado para publicacao.")
+        for blocker in editorial_blockers[:5]:
+            sinais_de_atencao.append(f"Bloqueio editorial: {blocker}")
+    if not chapter_review_ok:
+        pending = int(chapter_review.get("pending_count", 0))
+        rejected = int(chapter_review.get("rejected_count", 0))
+        if pending or rejected:
+            sinais_de_atencao.append(
+                f"Revisao por capitulo pendente: pending={pending}, rejected={rejected}."
+            )
     if not sinais_de_atencao:
         sinais_de_atencao.append("Nenhum alerta relevante encontrado.")
 
@@ -122,6 +141,11 @@ def build_user_summary(report: dict) -> dict:
             "Para manter visual mais proximo do PDF no leitor, prefira --layout fixed."
         )
     recomendacoes.append("Se encontrar falhas recorrentes, rode a conversao com OCR habilitado.")
+    if not editorial_ready:
+        recomendacoes.append(
+            "Finalize o gate editorial: rode epubcheck, complete metadados "
+            "e registre aprovacao humana."
+        )
 
     return {
         "status_geral": status,
@@ -137,6 +161,11 @@ def build_user_summary(report: dict) -> dict:
         "paginas_sem_ancora": missing_page_pages[:20],
         "visual_qa_status": visual_status,
         "visual_qa_percent": visual_percent,
+        "editorial_pronto_publicar": editorial_ready,
+        "editorial_score": round(editorial_score, 2),
+        "editorial_bloqueios": editorial_blockers[:20],
+        "chapter_review_aprovado": chapter_review_ok,
+        "epubcheck_status": epubcheck_status,
         "diferencas_texto": {
             "trechos_faltando": len(missing_segments),
             "trechos_extras": len(extra_segments),
